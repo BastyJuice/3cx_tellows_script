@@ -1,0 +1,246 @@
+using CallFlow;
+using System;
+using System.IO;
+using System.Net.Http;
+using System.Threading.Tasks;
+using System.Xml.Linq;
+using TCX.Configuration;
+using TCX.PBXAPI;
+using System.Linq;  // Required for string operations (like .Contains)
+
+namespace dummy
+{
+    public class CallHandler : ScriptBase<CallHandler>
+    {
+        // Logging variables
+        private static bool enableLogging = false;                                              // enable/disable logging        
+        private static string logFileName = "/path/to/log/tellows.log";                         // Log file path
+
+        // Tellows API variables
+        private static string tellowsApiKey = "your-api-key";
+        private static string tellowsPartnerID = "your-partner-id";
+        private static string internalSpamExtension = "04";                                     // Internal extension for spam calls
+        private static int tellowsThreshold = 5;                                                // Spam threshold
+        
+        // Whitelist and Blacklist of numbers, separated by commas
+        private static string whitelist = "+49123456789,+49234567890";                          // Whitelisted numbers
+        private static string blacklist = "+49345678901,+49456789012";                          // Blacklisted numbers
+
+        // Timeout variable for routing calls
+        private static TimeSpan routingTimeout = TimeSpan.FromSeconds(120); 					// Timeout for routing requests
+
+        PhoneSystem ps = null;
+
+        public override async void Start()
+        {
+            await Task.Run(async () =>
+            {
+                ps = MyCall.PS as PhoneSystem;
+
+                if (ps == null)
+                {
+                    Log("Error: Phone system not initialized");
+                    return;
+                }
+
+                string callerID = MyCall.Caller?.CallerID;
+                string dialedNumber = MyCall.DN?.Number;  // Get the originally dialed number (DN number)
+
+                if (string.IsNullOrEmpty(callerID))
+                {
+                    Log("CallerID is empty or invalid. Ending call.");
+                    MyCall.Return(false);  // End call if no valid CallerID
+                    return;
+                }
+
+                if (string.IsNullOrEmpty(dialedNumber))
+                {
+                    Log("Dialed number (DN) is empty or invalid. Ending call.");
+                    MyCall.Return(false);  // End call if no valid dialed number
+                    return;
+                }
+
+                Log($"Incoming call from: {callerID} to {dialedNumber}");
+
+                // Check if the caller is in the blacklist
+                if (IsBlacklisted(callerID))
+                {
+                    Log($"CallerID {callerID} is in the blacklist. Treating as spam.");
+                    await RouteCallToInternalExtension(internalSpamExtension);  // Forward call to internal extension
+                    MyCall.Return(true);  // End call after transferring to spam destination
+                    return;
+                }
+
+                // Check if the caller is in the whitelist
+                if (IsWhitelisted(callerID))
+                {
+                    Log($"CallerID {callerID} is in the whitelist. Treating as non-spam.");
+                    await RouteCallToOriginalDestination(dialedNumber);  // Forward to the originally dialed number
+                    return;
+                }
+
+                // Analyze call with Tellows API
+                int spamScore = await GetSpamScore(callerID);
+
+                if (spamScore >= tellowsThreshold)
+                {
+                    Log($"Spam detected with score: {spamScore}. Forwarding to internal extension {internalSpamExtension}.");
+                    await RouteCallToInternalExtension(internalSpamExtension);  // Forward call to internal extension
+                    MyCall.Return(true);  // End call after transferring to spam destination
+                }
+                else
+                {
+                    Log($"No spam detected. Score: {spamScore}. Forwarding to originally dialed number: {dialedNumber}");
+                    await RouteCallToOriginalDestination(dialedNumber);  // Forward to the originally dialed number
+                }
+            });
+        }
+
+        // Method to check if the caller ID is in the whitelist
+        private bool IsWhitelisted(string callerID)
+        {
+            // Split the whitelist by comma and check if the callerID is present
+            var whitelistNumbers = whitelist.Split(',');
+            return whitelistNumbers.Contains(callerID);
+        }
+
+        // Method to check if the caller ID is in the blacklist
+        private bool IsBlacklisted(string callerID)
+        {
+            // Split the blacklist by comma and check if the callerID is present
+            var blacklistNumbers = blacklist.Split(',');
+            return blacklistNumbers.Contains(callerID);
+        }
+
+        // Method to get spam score from Tellows API
+        private async Task<int> GetSpamScore(string callerID)
+        {
+            try
+            {
+                string apiUrl = $"https://www.tellows.de/basic/num/{callerID}?xml=1&partner={tellowsPartnerID}&apikey={tellowsApiKey}";
+                Log($"Making API request to Tellows: {apiUrl}");
+
+                using (HttpClient client = new HttpClient())
+                {
+                    HttpResponseMessage response = await client.GetAsync(apiUrl);
+                    Log($"API response status: {response.StatusCode}");
+                    response.EnsureSuccessStatusCode();
+
+                    string responseBody = await response.Content.ReadAsStringAsync();
+                    Log($"Tellows API response: {responseBody}");
+
+                    XDocument xmlResponse = XDocument.Parse(responseBody);
+                    XElement scoreElement = xmlResponse.Root.Element("score");
+
+                    if (scoreElement != null)
+                    {
+                        int spamScore = int.Parse(scoreElement.Value);
+                        Log($"Spam score for {callerID}: {spamScore}");
+                        return spamScore;
+                    }
+                    else
+                    {
+                        Log($"No spam score found in the API response for {callerID}");
+                        return 0; // Default value if score element is missing
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Error during spam score retrieval: {ex.Message}");
+                return 0; // Default value on failure
+            }
+        }
+
+        // Method to route the current call to the internal spam extension
+        private async Task RouteCallToInternalExtension(string extension)
+        {
+            try
+            {
+                Log($"Attempting to route call to internal extension: {extension}");
+
+                DN destination = PhoneSystem.Root.GetDNByNumber(extension);
+
+                if (destination == null)
+                {
+                    Log($"Internal extension number {extension} could not be resolved. Ending call.");
+                    MyCall.Return(false);  // End the call if the destination is invalid
+                    return;
+                }
+
+                // Use RouteToAsync to direct the call to the internal extension
+                CallControlResult result = await MyCall.RouteToAsync(new RouteRequest
+                {
+                    RouteTarget = new DestinationStruct(destination),
+                    TimeOut = routingTimeout // Use the timeout variable
+                });
+
+                if (result != null)
+                {
+                    Log($"Call successfully routed to internal extension: {extension}");
+                }
+                else
+                {
+                    Log($"Failed to route call to internal extension: {extension}");
+                    MyCall.Return(false);  // End the call if the routing fails
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Error during call routing to internal extension: {ex.Message}");
+                MyCall.Return(false);  // End the call if an exception occurs
+            }
+        }
+
+        // Method to forward the current call to the originally dialed number (destination)
+        private async Task RouteCallToOriginalDestination(string dialedNumber)
+        {
+            try
+            {
+                Log($"Attempting to forward call to original destination: {dialedNumber}");
+
+                // Forward the call to the original destination (internal or external number)
+                DN originalDestination = PhoneSystem.Root.GetDNByNumber(dialedNumber);
+
+                if (originalDestination == null)
+                {
+                    Log($"Original destination number {dialedNumber} could not be resolved. Ending call.");
+                    MyCall.Return(false);  // End the call if the destination is invalid
+                    return;
+                }
+
+                // Use RouteToAsync to direct the call to the originally dialed number
+                CallControlResult result = await MyCall.RouteToAsync(new RouteRequest
+                {
+                    RouteTarget = new DestinationStruct(originalDestination),
+                    TimeOut = routingTimeout // Use the timeout variable
+                });
+
+                if (result != null)
+                {
+                    Log($"Call successfully routed to original destination: {dialedNumber}");
+                }
+                else
+                {
+                    Log($"Failed to route call to original destination: {dialedNumber}");
+                    MyCall.Return(false);  // End the call if the routing fails
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Error during call forwarding to original destination: {ex.Message}");
+                MyCall.Return(false);  // End the call if an exception occurs
+            }
+        }
+
+        // Method for logging messages with 24-hour time format
+        public static void Log(string text)
+        {
+            if (enableLogging)  // Only log if logging is enabled
+            {
+                string logMessage = String.Format("[{0}]: {1}", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), text + Environment.NewLine);
+                File.AppendAllText(logFileName, logMessage);  // Append log to the file
+            }
+        }
+    }
+}
