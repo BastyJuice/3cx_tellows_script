@@ -1,4 +1,4 @@
-# 3CX Call Handling Script
+# 3CX Call Handling Script for Tellows Live API
 
 This script is designed to integrate with the **3CX phone system** to detect and handle spam calls using the **Tellows API**. It includes functionality for whitelisting and blacklisting specific numbers, routing calls based on spam scores, and logging events.
 
