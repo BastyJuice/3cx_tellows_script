@@ -73,3 +73,9 @@ This script is designed to integrate with the **3CX phone system** to detect and
 - The Tellows API key and partner ID are required for spam detection.
 - Ensure that the `logFileName` path is accessible and writable by the script.
 - Test the script thoroughly in a safe environment before deploying it in production.
+
+## Donation
+
+If this project helps you, you can give me a cup of coffee
+
+[![Donate](https://img.shields.io/badge/Donate-PayPal-green.svg)](https://paypal.me/bastyjuice)
